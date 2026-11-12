@@ -408,10 +408,14 @@ void ADS1292_PowerOnInit(void)
     ADS_START_LOW();    /* 停止数据转换 */
     ADS_RESET_LOW();    /* 硬件复位 */
     vTaskDelay(pdMS_TO_TICKS(1000));
+#ifdef DEBUG_ADS1292
     printf("[DIAG] PWR: reset low done\r\n");
+#endif
     ADS_RESET_HIGH();   /* 芯片上电，开始使能 */
     vTaskDelay(pdMS_TO_TICKS(100)); /* 等待稳定 */
+#ifdef DEBUG_ADS1292
     printf("[DIAG] PWR: reset high done\r\n");
+#endif
 
     ADS1292_Send_CMD(SDATAC);      /* 停止连续数据读取模式 */
     vTaskDelay(pdMS_TO_TICKS(10));

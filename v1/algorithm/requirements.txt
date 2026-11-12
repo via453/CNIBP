@@ -1,3 +1,6 @@
+# 注意：本文件是上游原版清单。
+# 在 Python 3.8 + TF 2.6 下实测通过的完整版本见 requirements-verified.txt；
+# 关键点：numpy 必须是 1.21.6（1.19.5 会导致 pandas 1.5.3 导入失败），且不要升到 >=1.24。
 absl-py==0.13.0
 astunparse==1.6.3
 bootstrapped==0.0.2
