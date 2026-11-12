@@ -28,7 +28,7 @@ archive/original/           # 原版（仅 archive 分支）
 └── docs/                   # 报告正文、数据表、三份协议说明
 ```
 
-`main` 的 `v1/` 见该分支下的 `docs/reproduce.md`。
+`main` 的 `v1/` 见 `v1/docs/reproduce.md`。
 
 ## 数据说明
 
