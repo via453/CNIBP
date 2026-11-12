@@ -43,6 +43,14 @@ extern volatile uint8_t g_ads1292_cache[9];
 /** @brief 数据读取完成标志 */
 extern volatile uint8_t g_ads1292_recv_flag;
 
+/* v1: ECG 环形缓冲。DRDY 中断里直接入队，任务侧批量取走，
+   避免「只存一个样本」时任务稍慢就被下一帧覆盖（实测丢 37%）。 */
+#define ECG_RING_SIZE 16
+extern volatile int32_t  g_ecg_ring[ECG_RING_SIZE];
+extern volatile uint8_t  g_ecg_ring_head;
+extern volatile uint8_t  g_ecg_ring_tail;
+extern volatile uint32_t g_ecg_ring_drops;
+
 /* ================================ ADS1292R 命令定义区 ================================ */
 
 /** @brief 系统命令 */

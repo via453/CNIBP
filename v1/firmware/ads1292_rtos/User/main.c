@@ -25,6 +25,17 @@
 /* 外部传感器读取函数（由用户实现） */
 extern int32_t ADS1292_ReadECG(void);           // 返回 uV
 extern void    MAX30102_Read(uint32_t *ir, uint32_t *red);  // 返回 IR, RED
+extern int32_t ADS1292_PopECG(int32_t *out);                // 从环形缓冲取一个 ECG 样本
+
+/* ================================ SWD 调试计数器 ==================================
+   用途：不接串口也能用 pyocd 读 RAM 验证三条链路的真实帧率。
+   只增不减的 uint32，溢出无害；占 12 字节 RAM。
+   读取方法见 v1/tools/probe_swd.py。 */
+volatile uint32_t g_dbg_ecg_frames  = 0;   /* ECG 帧发送计数 */
+volatile uint32_t g_dbg_ppg_frames  = 0;   /* PPG 帧发送计数 */
+volatile uint32_t g_dbg_temp_frames = 0;   /* TEMP 帧发送计数 */
+volatile uint32_t g_dbg_stage       = 0;   /* 初始化阶段号：定位卡在哪一步 */
+volatile uint32_t g_dbg_loops       = 0;   /* 主循环计数 */
 
 /**
   * @brief  发送 ECG 数据帧 (0xAA, 16字节)
@@ -50,6 +61,7 @@ static void SendECGPacket(int32_t uV, uint8_t hr)
     pkt[15] = 0;
     for(int i = 0; i < 15; i++) pkt[15] ^= pkt[i];  /* XOR CRC */
     USART_WriteBuf(pkt, 16);
+    g_dbg_ecg_frames++;
 }
 
 /**
@@ -77,6 +89,7 @@ static void SendPPGPacket(uint32_t ir, uint32_t red)
     pkt[16] = 0;
     for(int i = 0; i < 16; i++) pkt[16] ^= pkt[i];
     USART_WriteBuf(pkt, 17);
+    g_dbg_ppg_frames++;
 }
 
 /**
@@ -92,6 +105,7 @@ static void SendTEMPPacket(float temp_c)
     pkt[3] = raw & 0xFF;
     pkt[4] = pkt[0] ^ pkt[1] ^ pkt[2] ^ pkt[3];
     USART_WriteBuf(pkt, 5);
+    g_dbg_temp_frames++;
 }
 
 
@@ -212,46 +226,57 @@ int main(void)
 
 void Sensor_Task(void *pvParameters)
 {
-    static uint8_t  ppg_acc = 0;
     static uint8_t  inited  = 0;
     uint32_t ir_val = 0, red_val = 0;
     uint32_t last_temp_tick = 0;
+    uint32_t ppg_next_tick  = 0;
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
     (void)pvParameters;
 
     if (!inited)
     {
-        ADS1292_Init();
-        Set_ADS1292_Collect(0);
-        MAX30102_I2C_Init();
-        MAX30102_GPIO();
-        MAX30102_Check();
-        Max30102_reset();
+        g_dbg_stage = 1;  ADS1292_Init();
+        g_dbg_stage = 2;  Set_ADS1292_Collect(0);
+        g_dbg_stage = 3;  MAX30102_I2C_Init();
+        g_dbg_stage = 4;  MAX30102_GPIO();
+        g_dbg_stage = 5;  MAX30102_Check();
+        g_dbg_stage = 6;  Max30102_reset();
         vTaskDelay(pdMS_TO_TICKS(50));
-        MAX30102_Config();
+        g_dbg_stage = 7;  MAX30102_Config();
+        g_dbg_stage = 8;
         inited = 1;
+        ppg_next_tick = xTaskGetTickCount();
     }
 
     for (;;)
     {
-        uint32_t now = xTaskGetTickCount();
+        uint32_t now;
+        g_dbg_loops++;
+        g_dbg_stage = 9;
+        now = xTaskGetTickCount();
 
-        /* ECG：仅在新样本到达时发送，天然 250Hz，无重复 */
-        if (g_ads1292_recv_flag)
+        /* ECG：把环形缓冲里的积压样本全部发完。
+           DRDY 由中断入队，任务侧不会因为「取慢了一步」而丢样本。 */
         {
-            SendECGPacket(ADS1292_ReadECG(), 0);
+            int32_t ecg_v;
+            while (ADS1292_PopECG(&ecg_v))
+            {
+                SendECGPacket(ecg_v, 0);
+            }
         }
 
-        /* PPG：4ms 累加，阈值 10 → 平均严格 100Hz */
-        ppg_acc += 4;
-        if (ppg_acc >= 10)
+        /* PPG：按 tick 定时发，严格 100 Hz。
+           不能用「每圈累加固定值」——循环速率会随 ECG 积压/串口阻塞浮动，
+           那样 PPG 也会跟着漂（实测 114.8Hz），上位机按 100Hz 处理就错位了。 */
+        if ((int32_t)(now - ppg_next_tick) >= 0)
         {
-            ppg_acc -= 10;
             MAX30102_Read(&ir_val, &red_val);
-            if (ir_val != 0)
+            SendPPGPacket(ir_val, red_val);
+            ppg_next_tick += 10;                 /* 10 ms = 100 Hz */
+            if ((int32_t)(now - ppg_next_tick) > 20)
             {
-                SendPPGPacket(ir_val, red_val);
+                ppg_next_tick = now + 10;        /* 落后太多就重新对齐，不追旧账 */
             }
         }
 

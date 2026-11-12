@@ -23,14 +23,39 @@ int32_t ADS1292_ReadECG(void)
 
     if (g_ads1292_recv_flag)
     {
-        uint32_t raw = ((uint32_t)g_ads1292_cache[3] << 16)
-                     | ((uint32_t)g_ads1292_cache[4] << 8)
-                     |  (uint32_t)g_ads1292_cache[5];
+        uint32_t raw;
+
+        /* 关中断拷贝：DRDY 中断随时可能重写 g_ads1292_cache，
+           不保护会出现高低字节来自两帧的撕裂值 */
+        __disable_irq();
+        raw = ((uint32_t)g_ads1292_cache[3] << 16)
+            | ((uint32_t)g_ads1292_cache[4] << 8)
+            |  (uint32_t)g_ads1292_cache[5];
         g_ads1292_recv_flag = 0;
+        __enable_irq();
+
         last = get_volt(raw);
     }
 
     return last;
+}
+
+/**
+  * @brief  从 ECG 环形缓冲取一个样本
+  * @param  out 输出：ECG 微伏值
+  * @retval 1=取到，0=当前没有新样本
+  * @note   单生产者(ISR)/单消费者(任务)，head/tail 各由一方更新，无需关中断。
+  */
+int32_t ADS1292_PopECG(int32_t *out)
+{
+    if (g_ecg_ring_tail == g_ecg_ring_head)
+    {
+        return 0;
+    }
+
+    *out = g_ecg_ring[g_ecg_ring_tail];
+    g_ecg_ring_tail = (uint8_t)((g_ecg_ring_tail + 1u) % ECG_RING_SIZE);
+    return 1;
 }
 
 /**

@@ -21,6 +21,9 @@
 #define DEBUG_ADS1292   /**< 使能寄存器 printf 调试输出 */
 #endif
 
+/* v1: ISR 里要用到 get_volt（原定义在文件末尾） */
+int32_t get_volt(uint32_t num);
+
 /* ================================ 全局变量区 ================================ */
 
 /** @brief ADS1292R 12字节寄存器缓冲区 */
@@ -29,6 +32,12 @@ uint8_t ADS1292_REG[12];
 /** @brief 数据缓存和接收标志 */
 volatile uint8_t g_ads1292_cache[9];
 volatile uint8_t g_ads1292_recv_flag = 0;
+
+/* v1: ECG 环形缓冲（ISR 写、任务读，单生产者单消费者，无需锁） */
+volatile int32_t  g_ecg_ring[ECG_RING_SIZE];
+volatile uint8_t  g_ecg_ring_head = 0;
+volatile uint8_t  g_ecg_ring_tail = 0;
+volatile uint32_t g_ecg_ring_drops = 0;
 
 /** @brief 寄存器配置结构体实例 */
 ADS1292_CONFIG1  g_ads_cfg1  = { DATA_RATE };
@@ -174,9 +183,24 @@ void ADS1292_Init(void)
 void EXTI1_IRQHandler(void)
 {
     if ((EXTI->IMR & EXTI_Line1) && (ADS_DRDY_READ() == 0)) {
+        uint32_t raw;
+        uint8_t  next;
+
         EXTI_ClearITPendingBit(EXTI_Line1);
         ADS1292_Read_Data((uint8_t *)g_ads1292_cache);
         g_ads1292_recv_flag = 1;
+
+        /* 立刻把 CH1 转成 uV 并入队，任务侧再慢慢发 */
+        raw  = ((uint32_t)g_ads1292_cache[3] << 16)
+             | ((uint32_t)g_ads1292_cache[4] << 8)
+             |  (uint32_t)g_ads1292_cache[5];
+        next = (uint8_t)((g_ecg_ring_head + 1u) % ECG_RING_SIZE);
+        if (next != g_ecg_ring_tail) {
+            g_ecg_ring[g_ecg_ring_head] = get_volt(raw);
+            g_ecg_ring_head = next;
+        } else {
+            g_ecg_ring_drops++;      /* 环形缓冲满：极端情况下的可观测丢样 */
+        }
     }
 }
 
@@ -525,6 +549,12 @@ uint8_t Set_ADS1292_Collect(uint8_t mode)
     vTaskDelay(pdMS_TO_TICKS(10));
     ADS1292_Send_CMD(START_CMD); /* 发送开始转换命令（硬件START引脚也需拉高） */
     vTaskDelay(pdMS_TO_TICKS(10));
+
+    /* v1: 采集启动后重新使能 DRDY(EXTI1) 中断。
+       ADS1292_Init() 里为了让上电配置不受干扰把 IMR 关掉了，
+       原工程的 ECG_Task 负责重新打开；v1 的 Sensor_Task 不自带这句，
+       所以必须在这里补上，否则 g_ads1292_recv_flag 永远为 0，一帧 ECG 都收不到。 */
+    EXTI->IMR |= EXTI_Line1;
 
     return 0;
 }

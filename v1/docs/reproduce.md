@@ -138,6 +138,42 @@ python v1\tools\probe_serial.py --port COM37 --duration 30
 
 预期：ECG 248–252/s、PPG 98–102/s、TEMP ≈1/s、bad=0。
 
+### 没有串口也能验证：SWD 探针
+
+板子只接了 ST-Link、没有 USB 串口时，用 SWD 直接读固件里的计数器：
+
+```bat
+D:\microsoft_download\anaconda3\Anaconda\python.exe C:\Users\Zelvia\cnibp.staging\v1\tools\probe_swd.py
+```
+
+实测输出（2026-11-13，STM32F103 高密度 256K）：
+
+```
+时间基准：tick 差值 10.004 s（1 kHz）
+链路               差值       速率/s       期望/s 判定
+ecg            2502      250.1        250 PASS
+ppg            1001      100.1        100 PASS
+temp             10        1.0          1 PASS
+主循环速率   : 250.2 /s
+初始化阶段号 : 9  （9 = 已进入主循环）
+fifo_ir/red  : 11532 / 10941
+ALL PASS
+```
+
+`probe_swd.py` 依赖固件里的 `g_dbg_*` 计数器（v1 已内置，占 20 字节 RAM），
+符号地址从 `build/PhysioCard_v1.axf` 实时解析。
+
+### 一键构建 + 烧录
+
+```bat
+bash C:\Users\Zelvia\cnibp.staging\v1\tools\build_firmware.sh
+D:\microsoft_download\anaconda3\Anaconda\python.exe -m pyocd flash -t stm32f103rc ^
+     C:\Users\Zelvia\cnibp.staging\v1\firmware\ads1292_rtos\build\PhysioCard_v1.hex
+```
+
+构建脚本用 armcc/armlink/fromelf（`D:\keil5\ARM\ARMCC\bin`）复刻 EIDE 的参数，
+源文件清单取自 `build/Target 1/builder.params`。
+
 ## 6. 有硬件：端到端
 
 ```bat

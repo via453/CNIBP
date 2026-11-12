@@ -37,29 +37,52 @@
 
 /**
  * @brief  微秒级延时函数
- *         使用 SysTick 定时器实现精确的微秒级延时
- * @param  xus 延时时长，单位：微秒，范围：0~233015
+ * @param  xus 延时时长，单位：微秒
  * @retval 无
- * @note   系统时钟为 72MHz，每个机器周期为 1/72 微秒
+ * @note   v1 修复：原实现直接改写 SysTick->CTRL 并在结束时写 0x00000004，
+ *         等于把 SysTick 关掉，FreeRTOS 的系统节拍就此停止（所有任务永久阻塞，
+ *         只剩 idle 任务在跑）。这里改用 Cortex-M3 的 DWT 周期计数器做忙等，
+ *         完全不碰 SysTick，任务态/中断态都能安全调用。
  */
+/* v1: 用 Cortex-M3 的 DWT 周期计数器做延时，避开 SysTick 与 FreeRTOS 的冲突。
+   这里直接写寄存器地址，避免不同 CMSIS 版本 DWT_Type / CoreDebug 定义差异。 */
+#define DEMCR_ADDR      (0xE000EDFCUL)   /* Debug Exception and Monitor Control */
+#define DEMCR_TRCENA    (1UL << 24)
+#define DWT_CTRL_ADDR   (0xE0001000UL)   /* DWT Control */
+#define DWT_CYCCNT_ADDR (0xE0001004UL)   /* DWT Cycle Count */
+#define DWT_CYCCNTENA   (1UL << 0)
+
 void Delay_us(uint32_t xus)
 {
-    SysTick->LOAD = 72 * xus;               // 设置定时器重装值
-    SysTick->VAL = 0x00;                    // 清空当前计数值
-    SysTick->CTRL = 0x00000005;             // 设置时钟源为 HCLK，启动定时器
-    while(!(SysTick->CTRL & 0x00010000));   // 等待计数到 0
-    SysTick->CTRL = 0x00000004;             // 关闭定时器
+    volatile uint32_t *demcr  = (volatile uint32_t *)DEMCR_ADDR;
+    volatile uint32_t *dwtc   = (volatile uint32_t *)DWT_CTRL_ADDR;
+    volatile uint32_t *cycnt  = (volatile uint32_t *)DWT_CYCCNT_ADDR;
+    uint32_t start, ticks;
+
+    if ((*demcr & DEMCR_TRCENA) == 0)
+    {
+        *demcr |= DEMCR_TRCENA;      /* 使能跟踪单元 */
+        *cycnt  = 0;
+        *dwtc  |= DWT_CYCCNTENA;     /* 启动周期计数器 */
+    }
+
+    ticks = xus * (SystemCoreClock / 1000000U);
+    start = *cycnt;
+    while ((*cycnt - start) < ticks)
+    {
+        /* 忙等；无符号减法天然处理计数器回绕 */
+    }
 }
 
 /**
  * @brief  毫秒级延时函数
- *         通过循环调用 Delay_us 实现毫秒级延时
- * @param  xms 延时时长，单位：毫秒，范围：0~4294967295
+ * @param  xms 延时时长，单位：毫秒
  * @retval 无
+ * @note   阻塞式忙等。任务中若需让出 CPU 请用 vTaskDelay()。
  */
 void Delay_ms(uint32_t xms)
 {
-    while(xms--)
+    while (xms--)
     {
         Delay_us(1000);
     }
@@ -67,14 +90,14 @@ void Delay_ms(uint32_t xms)
 
 /**
  * @brief  秒级延时函数
- *         通过循环调用 Delay_ms 实现秒级延时
- * @param  xs 延时时长，单位：秒，范围：0~4294967295
+ * @param  xs 延时时长，单位：秒
  * @retval 无
  */
 void Delay_s(uint32_t xs)
 {
-    while(xs--)
+    while (xs--)
     {
         Delay_ms(1000);
     }
 }
+
