@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.venv/
+.versions/
+.sisyphus/
+*.uvguix.*
+build/
+Objects/
+Listings/
+LOGFILE/
+data/*.hdf5
+data/train*.p
+data/val*.p
+data/test.p
+BP.zip
+*.log
+
+# 隐私：报告封面含姓名/学号/指导教师，一律不入库
+*.docx
+课设报告*
+cNIBP*.pdf
