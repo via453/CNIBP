@@ -100,61 +100,7 @@ static void SendTEMPPacket(float temp_c)
 static void SystemClock_Init(void);         ///< 系统时钟初始化
 static void start_task(void *pvParameters); ///< 开始任务函数
 static void Sys_Init(void);                 ///< 系统初始化函数
-static void Sensor_Task(void *pvParameters)
-{
-    static uint8_t  ppg_acc = 0;
-    static uint8_t  inited  = 0;
-    uint32_t ir_val = 0, red_val = 0;
-    uint32_t last_temp_tick = 0;
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-
-    (void)pvParameters;
-
-    if (!inited)
-    {
-        ADS1292_Init();
-        Set_ADS1292_Collect(0);
-        MAX30102_I2C_Init();
-        MAX30102_GPIO();
-        MAX30102_Check();
-        Max30102_reset();
-        vTaskDelay(pdMS_TO_TICKS(50));
-        MAX30102_Config();
-        inited = 1;
-    }
-
-    for (;;)
-    {
-        uint32_t now = xTaskGetTickCount();
-
-        /* ECG：仅在新样本到达时发送，天然 250Hz，无重复 */
-        if (g_ads1292_recv_flag)
-        {
-            SendECGPacket(ADS1292_ReadECG(), 0);
-        }
-
-        /* PPG：4ms 累加，阈值 10 → 平均严格 100Hz */
-        ppg_acc += 4;
-        if (ppg_acc >= 10)
-        {
-            ppg_acc -= 10;
-            MAX30102_Read(&ir_val, &red_val);
-            if (ir_val != 0)
-            {
-                SendPPGPacket(ir_val, red_val);
-            }
-        }
-
-        /* TEMP @1Hz */
-        if (now - last_temp_tick >= 1000)
-        {
-            SendTEMPPacket(g_CurrentTemp);
-            last_temp_tick = now;
-        }
-
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(4));
-    }
-}
+void Sensor_Task(void *pvParameters);   ///< 传感器采集任务（V4 三帧）
 
 
 /**
@@ -262,3 +208,60 @@ int main(void)
     }
 }
 
+/* ================================ 传感器采集任务实现 ================================ */
+
+void Sensor_Task(void *pvParameters)
+{
+    static uint8_t  ppg_acc = 0;
+    static uint8_t  inited  = 0;
+    uint32_t ir_val = 0, red_val = 0;
+    uint32_t last_temp_tick = 0;
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    (void)pvParameters;
+
+    if (!inited)
+    {
+        ADS1292_Init();
+        Set_ADS1292_Collect(0);
+        MAX30102_I2C_Init();
+        MAX30102_GPIO();
+        MAX30102_Check();
+        Max30102_reset();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        MAX30102_Config();
+        inited = 1;
+    }
+
+    for (;;)
+    {
+        uint32_t now = xTaskGetTickCount();
+
+        /* ECG：仅在新样本到达时发送，天然 250Hz，无重复 */
+        if (g_ads1292_recv_flag)
+        {
+            SendECGPacket(ADS1292_ReadECG(), 0);
+        }
+
+        /* PPG：4ms 累加，阈值 10 → 平均严格 100Hz */
+        ppg_acc += 4;
+        if (ppg_acc >= 10)
+        {
+            ppg_acc -= 10;
+            MAX30102_Read(&ir_val, &red_val);
+            if (ir_val != 0)
+            {
+                SendPPGPacket(ir_val, red_val);
+            }
+        }
+
+        /* TEMP @1Hz */
+        if (now - last_temp_tick >= 1000)
+        {
+            SendTEMPPacket(g_CurrentTemp);
+            last_temp_tick = now;
+        }
+
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(4));
+    }
+}

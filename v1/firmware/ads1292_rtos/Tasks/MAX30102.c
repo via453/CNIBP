@@ -1,4 +1,14 @@
 #include "MAX30102.h"
+/* 调试开关：默认关闭。开启后 printf 会走 USART1，与 V4 二进制帧流共用同一串口，
+   会把 ASCII 混进 0xAA/0xBB/0xCC 帧之间，导致上位机丢帧或帧同步失败。 */
+/* #define MAX30102_DEBUG */
+#ifdef MAX30102_DEBUG
+#include <stdio.h>
+#define MAX30102_LOG(...)   MAX30102_LOG(__VA_ARGS__)
+#else
+#define MAX30102_LOG(...)   do { } while (0)
+#endif
+
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -33,7 +43,7 @@ uint8_t Max30102_reset(void)
 		retry++;
 	}
 
-	printf("MAX30102复位超时！\r\n");
+	MAX30102_LOG("MAX30102复位超时！\r\n");
 	return 0;
 }
 
@@ -45,23 +55,24 @@ uint8_t MAX30102_Check(void)
 {
 	uint8_t part_id;
 	uint8_t rev_id;
+	(void)rev_id;   /* 仅 DEBUG 日志使用 */
 
 	// 读取 PART_ID 寄存器 (0xFF)，正常应返回 0x15
 	part_id = MAX30102_I2C_ReadByte(MAX30102_Device_address, REG_PART_ID);
 	// 读取 REV_ID 寄存器 (0xFE)
 	rev_id = MAX30102_I2C_ReadByte(MAX30102_Device_address, REG_REV_ID);
 
-	printf("MAX30102 PART_ID: 0x%02X (expected: 0x15)\r\n", part_id);
-	printf("MAX30102 REV_ID: 0x%02X\r\n", rev_id);
+	MAX30102_LOG("MAX30102 PART_ID: 0x%02X (expected: 0x15)\r\n", part_id);
+	MAX30102_LOG("MAX30102 REV_ID: 0x%02X\r\n", rev_id);
 
 	if (part_id == 0x15)
 	{
-		printf("MAX30102 detected OK!\r\n");
+		MAX30102_LOG("MAX30102 detected OK!\r\n");
 		return 0; // 成功
 	}
 	else
 	{
-		printf("MAX30102 NOT detected! Check your IIC connection.\r\n");
+		MAX30102_LOG("MAX30102 NOT detected! Check your IIC connection.\r\n");
 		return 1; // 失败
 	}
 }
@@ -73,6 +84,7 @@ uint8_t MAX30102_Check(void)
 uint8_t MAX30102_IIC_Test(void)
 {
 	uint8_t temp;
+	(void)temp;   /* 仅用于读清中断状态 */
 	uint8_t test_val = 0x05;
 	uint8_t read_back;
 
@@ -88,31 +100,30 @@ uint8_t MAX30102_IIC_Test(void)
 	// 恢复原值
 	MAX30102_I2C_WriteByte(MAX30102_Device_address, REG_FIFO_WR_PTR, temp);
 
-	printf("IIC Test: Write 0x%02X, Read 0x%02X ", test_val, read_back);
+	MAX30102_LOG("IIC Test: Write 0x%02X, Read 0x%02X ", test_val, read_back);
 
 	if (read_back == test_val)
 	{
-		printf("- PASS\r\n");
+		MAX30102_LOG("- PASS\r\n");
 		return 0; // 成功
 	}
 	else
 	{
-		printf("- FAIL\r\n");
+		MAX30102_LOG("- FAIL\r\n");
 		return 1; // 失败
 	}
 }
 
 void MAX30102_Config(void)
 {
-	uint8_t temp;
 
 	// 1. 先关中断
 	MAX30102_I2C_WriteByte(MAX30102_Device_address, REG_INTR_ENABLE_1, 0x00);
 	MAX30102_I2C_WriteByte(MAX30102_Device_address, REG_INTR_ENABLE_2, 0x00);
 
 	// 2. 清除中断状态（读状态寄存器）
-	temp = MAX30102_I2C_ReadByte(MAX30102_Device_address, REG_INTR_STATUS_1);
-	temp = MAX30102_I2C_ReadByte(MAX30102_Device_address, REG_INTR_STATUS_2);
+	(void)MAX30102_I2C_ReadByte(MAX30102_Device_address, REG_INTR_STATUS_1);   /* 读一次清中断标志 */
+	(void)MAX30102_I2C_ReadByte(MAX30102_Device_address, REG_INTR_STATUS_2);
 
 	// 3. 复位FIFO指针
 	MAX30102_I2C_WriteByte(MAX30102_Device_address, REG_FIFO_WR_PTR, 0x00);

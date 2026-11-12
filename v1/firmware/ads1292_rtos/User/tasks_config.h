@@ -69,6 +69,7 @@ extern TaskHandle_t SensorTask_Handler;   ///< 传感器任务句柄
 
 /* ================================ 导出函数声明区 ============================ */
 void BaseTaskCreate(void);    ///< 基础任务创建函数声明
+void Sensor_Task(void *pvParameters);   ///< 传感器采集任务（V4 三帧）
 void SysTaskCreate(void);     ///< 系统任务创建函数声明
 
 #endif /* __TASKS_CONFIG_H */
