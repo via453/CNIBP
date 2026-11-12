@@ -10,6 +10,9 @@ from tensorflow.keras.losses import MeanSquaredError
 import abpimputation.project_configs as project_configs
 from abpimputation.preprocessing.features import ppg_scaling, create_feature_matrix
 
+_VNET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'models', 'vnet_32s_mimic')
+
 def batch_custom_loss(y_true, y_pred):
     # multiply ABP with mask to get sys/dias BP values
     true_bp_values = y_true[:, :, 0] * y_true[:, :, 1]
@@ -23,10 +26,13 @@ def batch_custom_loss(y_true, y_pred):
 
 class ABPImputer(BaseEstimator):
 
-    def __init__(self, demo_param='demo', pickle_dir="abpimputation/models/vnet_32s_mimic"):
+    def __init__(self, demo_param='demo', pickle_dir=None):
         
-        model_dir = "abpimputation/models/vnet_32s_mimic"
+        # v1: 模型路径改为相对本模块解析，避免依赖启动时的工作目录
+        model_dir = _VNET_DIR
         
+        pickle_dir = pickle_dir or _VNET_DIR
+
         assert os.path.exists(pickle_dir)
         assert os.path.exists(model_dir)
 

@@ -1,5 +1,9 @@
 import sys
 import os
+
+
+_VNET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        'models', 'vnet_32s_mimic')
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
@@ -112,7 +116,7 @@ def calc_waveform_feats(window: np.ndarray, debug=False):
 
     return np.array([heart_rate, np.median(pat), np.std(pat)])
 
-def create_feature_matrix(X_train: np.ndarray, pickle_dir="abpimputation/models/vnet_32s_mimic"):
+def create_feature_matrix(X_train: np.ndarray, pickle_dir=None):
     """[summary]
 
     Args:
@@ -125,6 +129,7 @@ def create_feature_matrix(X_train: np.ndarray, pickle_dir="abpimputation/models/
         np.ndarray: numpy array with additional waveform features added
     """
     # load pickled mean/std and standardize waveform signals
+    pickle_dir = pickle_dir or _VNET_DIR
     mean_vals = pickle.load(open(os.path.join(pickle_dir, "mean_vals.pkl"), "rb"))
     std_vals = pickle.load(open(os.path.join(pickle_dir, "std_vals.pkl"), "rb"))
     X_train = (X_train - mean_vals) / std_vals

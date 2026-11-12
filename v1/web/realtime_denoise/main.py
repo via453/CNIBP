@@ -83,20 +83,36 @@ NIBP = {'sys': 120.0, 'dias': 80.0, 'mean': 93.0}
 # ============================================================================
 # 模拟数据文件（循环播放真实ECG+PPG数据）
 # ============================================================================
-_SIM_ECG_DATA = np.loadtxt(os.path.join(_HERE, 'data', 'kai4.csv'), delimiter=',', skiprows=1)
-_SIM_ECG_RAW = _SIM_ECG_DATA[:, 1].astype(np.float64)
-_SIM_ECG_POS = 0
-
+# v1: 优先使用「同一受试者」的合成记录（ECG/PPG 同源，PAT 才有生理意义）。
+#     找不到时回退到旧的 kai4.csv + ppg_waveform.csv（两者来自不同受试者，PAT 无意义）。
+_SIM_RECORD = os.path.join(_HERE, 'data', 'sim_record.csv')
 import csv as _csv
-_SIM_PPG_DATA = []
-with open(os.path.join(_HERE, 'data', 'ppg_waveform.csv'), 'r', encoding='utf-8') as _f:
-    for _row in _csv.DictReader(_f):
-        _SIM_PPG_DATA.append(float(_row['ppg_value']))
-_SIM_PPG_RAW = np.array(_SIM_PPG_DATA, dtype=np.float64)
+_SIM_ECG_FS = 250
 _SIM_PPG_FS = 100
+
+if os.path.exists(_SIM_RECORD):
+    _rec = np.loadtxt(_SIM_RECORD, delimiter=',', skiprows=1)
+    _ecg_100 = _rec[:, 1].astype(np.float64)
+    _SIM_PPG_RAW = _rec[:, 2].astype(np.float64)
+    # 记录是 100Hz，界面按 250Hz 播放 → 上采样 5/2，保持时长不变
+    _SIM_ECG_RAW = scipy_signal.resample_poly(_ecg_100, 5, 2)
+    _SIM_ECG_SRC = 'sim_record.csv（ECG/PPG 同一受试者）'
+else:
+    _SIM_ECG_DATA = np.loadtxt(os.path.join(_HERE, 'data', 'kai4.csv'),
+                               delimiter=',', skiprows=1)
+    _SIM_ECG_RAW = _SIM_ECG_DATA[:, 1].astype(np.float64)
+    _SIM_PPG_DATA = []
+    with open(os.path.join(_HERE, 'data', 'ppg_waveform.csv'), 'r', encoding='utf-8') as _f:
+        for _row in _csv.DictReader(_f):
+            _SIM_PPG_DATA.append(float(_row['ppg_value']))
+    _SIM_PPG_RAW = np.array(_SIM_PPG_DATA, dtype=np.float64)
+    _SIM_ECG_SRC = 'kai4.csv + ppg_waveform.csv（不同受试者，PAT 无意义）'
+
+_SIM_ECG_POS = 0
 _SIM_PPG_POS = 0
-print(f'  [模拟] 加载ECG: {len(_SIM_ECG_RAW)}点')
-print(f'  [模拟] 加载PPG: {len(_SIM_PPG_RAW)}点')
+print(f'  [模拟] 加载ECG: {len(_SIM_ECG_RAW)}点 @250Hz')
+print(f'  [模拟] 加载PPG: {len(_SIM_PPG_RAW)}点 @100Hz')
+print(f'  [模拟] 数据源: {_SIM_ECG_SRC}')
 
 # ============================================================================
 # 环形缓冲区
@@ -859,6 +875,7 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
     g_latest_temp = 20.0                        # 最新体温
     g_latest_spo2 = 98                          # 最新SpO2
     last_model_time = 0                         # 上次模型推理时间
+    _ppg_acc = 0                                # PPG 模拟采样率累加器（100Hz）
     model_results = None                        # 缓存模型结果
     model_lock = threading.Lock()
 
@@ -895,7 +912,11 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                     ts_sim = time.time()
                     for v in new_samples:
                         ecg_ts_buffer.append((ts_sim, v))
-                    ppg_out = simulator.generate_ppg(max(1, HOP_SIZE // 3))
+                    # PPG 严格按 PPG_FS 输出（避免 62.5Hz 导致 PAT 失真 / 窗口填不满）
+                    _ppg_acc += HOP_SIZE * PPG_FS
+                    _n_ppg = _ppg_acc // FS
+                    _ppg_acc -= _n_ppg * FS
+                    ppg_out = simulator.generate_ppg(int(_n_ppg))
                     for v in ppg_out:
                         ppg_ts_buffer.append((ts_sim, v))
                     g_latest_temp = simulator.get_temp()
@@ -954,9 +975,16 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                             from abp_sensor_bridge import process_sensor_data
                             sbp, dbp, map_val, wf = process_sensor_data(
                                 ecg_32s, ppg_32s, NIBP['sys'], NIBP['dias'], NIBP['mean'])
-                            with model_lock:
-                                model_results = {'sbp': round(sbp,1), 'dbp': round(dbp,1), 'map': round(map_val,1), 'waveform': wf.tolist()[:500]}
-                            print(f"  [模型] cNIBP: SBP={sbp:.1f} DBP={dbp:.1f} MAP={map_val:.1f}")
+                            # 生理合理性闸门：不合理输出不写入面板，避免显示 -223 这类值
+                            _valid = (80 <= sbp <= 200 and 40 <= dbp <= 120
+                                      and sbp - dbp >= 15)
+                            if _valid:
+                                with model_lock:
+                                    model_results = {'sbp': round(sbp,1), 'dbp': round(dbp,1), 'map': round(map_val,1), 'waveform': wf.tolist()[:500]}
+                                print(f"  [模型] cNIBP: SBP={sbp:.1f} DBP={dbp:.1f} MAP={map_val:.1f}")
+                            else:
+                                print(f"  [模型] 输出越界（SBP={sbp:.1f} DBP={dbp:.1f} MAP={map_val:.1f}），已丢弃"
+                                      f"；面板保留演示值。模拟模式下 ECG/PPG 非同一受试者，PAT 无意义属预期。")
                         except Exception as e:
                             print(f"  [模型] 错误: {e}")
                             import traceback
@@ -1004,12 +1032,14 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                     # 检测信号是否存活
                     signal_alive = float(np.max(np.abs(raw_vis[-FS:]))) > 0.01 if len(raw_vis) >= FS else True
 
-                    # 模拟模式使用固定生命体征
+                    # 模拟模式：体温/SpO2 用记录值；cNIBP 有模型结果就用模型结果，
+                    # 还没到 32 秒窗口时才退回演示值（92/60/71）
                     if mode == 'simulation':
                         hr_bpm = 72.0
                         g_latest_temp = 32.3
                         g_latest_spo2 = 98
-                        cNIBP = {'sbp': 92, 'dbp': 60, 'map': 71}
+                        with model_lock:
+                            cNIBP = model_results if model_results else {'sbp': 92, 'dbp': 60, 'map': 71}
                     else:
                         with model_lock:
                             cNIBP = model_results

@@ -82,18 +82,40 @@ python abp_sensor_bridge.py --selftest
 
 （原始计划 T7b 记录 120.5 / 75.2 / 101.1，差异来自合成数据随机种子，量级一致。）
 
-## 3. 无硬件：网页模拟模式
+## 3. 无硬件：网页模拟模式（即可看到真实模型数值）
 
 ```bat
 cd v1\web\realtime_denoise
 python main.py
 ```
 
-打开 `http://localhost:8080`。实测：HTTP 200（25,089 B），页面含「连续血压 cNIBP」
-SBP/DBP/MAP 面板；`/stream` 每 20ms 推一帧 JSON 波形。约 32 秒后控制台出现
-`[模型] cNIBP: SBP=… DBP=… MAP=…`。
+打开 `http://localhost:8080`。约 32 秒后控制台出现：
 
-> 模拟模式的 cNIBP 若显示 `92/60/71`，那是 `main.py` 的固定演示值，不代表模型输出；以第 1、2 步为准。
+```
+[bridge] HR = 72.1 bpm | PAT = 220.0 ± 17.7 ms
+[模型] cNIBP: SBP=123.6 DBP=71.4 MAP=80.5
+```
+
+面板同时显示 SBP 123.6 / DBP 71.4 / MAP 80.5 与 ABP 波形（`/stream` 的 `cNIBP` 字段）。
+
+### 模拟数据源（v1 修正）
+
+| 文件 | 内容 | 说明 |
+|:--|:--|:--|
+| `data/sim_record.csv` | `t, ecg, ppg, abp_ref_mmHg`，3200 点 @100Hz（32 s） | **首选**。取自 `algorithm/data/synthetic_test.csv.gz` 的同一受试者记录，ECG/PPG 同源，PAT 有生理意义；参考 ABP 92.6–128.0 mmHg |
+| `data/kai4.csv` + `data/ppg_waveform.csv` | 旧数据 | 回退用。二者来自**不同受试者**，算出的 PAT 无意义，会把模型推成越界值（实测出现过 SBP 206 / DBP −223） |
+
+启动日志会打印实际使用的数据源：
+
+```
+[模拟] 加载ECG: 8000点 @250Hz
+[模拟] 加载PPG: 3200点 @100Hz
+[模拟] 数据源: sim_record.csv（ECG/PPG 同一受试者）
+```
+
+> v1 另外加了**生理合理性闸门**：`SBP∉[80,200]` 或 `DBP∉[40,120]` 或 `SBP−DBP<15` 的推理结果
+> 不写入面板，只在控制台打印 `[模型] 输出越界…已丢弃`，避免把 −223 mmHg 这类值显示给用户。
+> 34 秒前尚未跑出模型结果时，面板显示的是演示值 92/60/71。
 
 ## 4. 有硬件：编译烧录（v1 固件）
 
@@ -130,5 +152,24 @@ python v1\web\realtime_denoise\main.py --port COM37 --nibp-sys 120 --nibp-dias 8
 |:--|:--|:--|
 | PPG 帧率 ~250/s | 未烧 v1 固件 | 重新编译烧录 |
 | bad 计数高 | 波特率/接线/共地 | 检查 CH340 与 GND |
-| cNIBP 不更新 | 窗口不足 32s | 等待或检查 `window_cover_sec` |
+| cNIBP 一直是 92/60/71 | 未满 32 秒窗口，或推理被闸门丢弃 | 等 35 s；看控制台有没有 `[模型] 输出越界` |
+| cNIBP 出现 206 / −223 这类值 | 用的是旧模拟源（ECG/PPG 不同受试者） | 确认 `data/sim_record.csv` 存在；已加闸门不会上屏 |
+| HR = 0 bpm、PAT = 250.0 | R 波一个都没检出 | 跑 `python v1/tools/diag_sim_window.py` 定位 |
 | 导入 `signal_processing` 失败 | `_ABP_ROOT` 未指向 `v1/algorithm` | 确认目录结构 |
+| `import pandas` 报 numpy < 1.20.3 | 环境 numpy 太旧 | `pip install "numpy==1.21.6"` |
+
+## 附：单窗口诊断工具
+
+```bat
+python v1\tools\diag_sim_window.py          :: 只看信号链路
+python v1\tools\diag_sim_window.py --model  :: 连模型一起跑
+```
+
+输出 ECG/PPG 统计、R 波与 PPG 峰个数、HR、PAT 与判定。正常应看到：
+
+```
+  R 波个数 = 39   PPG 峰个数 = 39
+  HR = 72.1 bpm
+  PAT = 220.0 ± 17.7 ms
+    ✓ 峰值与 PAT 均合理，模型输出可用
+```
