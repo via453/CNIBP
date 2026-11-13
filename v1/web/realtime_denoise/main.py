@@ -62,7 +62,10 @@ from signal_processing import parse_ppg_packet as _parse_ppg_pkt
 # ============================================================================
 FS = 250                     # 采样率 (Hz) — 与 MCU 一致 (MCU 固定 250Hz)
 PPG_FS = 100                    # PPG 采样率 (Hz)
-MODEL_WINDOW_SEC = 32           # cNIBP 模型输入窗口 (秒)
+MODEL_WINDOW_SEC = 32           # ABPImputation 输入窗口 (秒)
+PPG2ABP_WIN_SEC = 25            # PPG2ABP 需要 8.2s × 3 窗 ≈ 24.6s
+MODEL_KIND = 'abpimputation'    # 由 --model 覆盖：abpimputation | ppg2abp
+CALIB = None                    # 由 --calib / calib.json 加载
 ECG_PACKET_LEN = 16             # 0xAA ECG 包长度
 PPG_PACKET_LEN = 17             # 0xBB PPG 包长度
 TEMP_PACKET_LEN = 5             # 0xCC TEMP 包长度
@@ -971,20 +974,18 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                     t = threading.Thread(target=run_batch, args=(current_batch,), daemon=True)
                     t.start()
 
-                # ---- V4 模型推理（每32秒） ----
-                if (len(ecg_ts_buffer) >= MODEL_WINDOW_SEC * FS
-                        and len(ppg_ts_buffer) >= MODEL_WINDOW_SEC * PPG_FS
-                        and time.time() - last_model_time >= MODEL_WINDOW_SEC):
+                # ---- 血压推理（按模式：ABPImputation / PPG2ABP） ----
+                _need_ecg = (MODEL_KIND == 'abpimputation')
+                _win = MODEL_WINDOW_SEC if _need_ecg else PPG2ABP_WIN_SEC
+                _buf_ok = len(ppg_ts_buffer) >= _win * PPG_FS
+                if _need_ecg:
+                    _buf_ok = _buf_ok and len(ecg_ts_buffer) >= _win * FS
+                if _buf_ok and time.time() - last_model_time >= _win:
                     last_model_time = time.time()
                     def run_model():
                         nonlocal model_results
                         try:
-                            ecg_32s = np.array([v for _, v in list(ecg_ts_buffer)[-MODEL_WINDOW_SEC*FS:]])
-
-                            # v1: 是否降采样必须看「实际到达速率」，不能看缓冲长度。
-                            # 缓冲是 60 秒的 deque，按 100Hz 满量就是 6000 点，
-                            # 原来用 len > 32*100*1.5 判断会一直成立，把本来 100Hz 的
-                            # PPG 又压成 40Hz（实测日志 "样本 2400"）。
+                            # ---- PPG 取窗（两种模式共用） ----
                             ppg_list = list(ppg_ts_buffer)
                             ppg_vals = np.array([v for _, v in ppg_list], dtype=np.float64)
                             ppg_ts = np.array([t for t, _ in ppg_list], dtype=np.float64)
@@ -994,20 +995,36 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                             if ppg_rate > PPG_FS * 1.5:
                                 ppg_vals = scipy_signal.resample_poly(ppg_vals, 2, 5)
                                 print(f"  [模型] PPG 实测 {ppg_rate:.0f}Hz → 降采样到 100Hz，样本 {len(ppg_vals)}")
-                            ppg_32s = ppg_vals[-MODEL_WINDOW_SEC*PPG_FS:]
-                            from abp_sensor_bridge import process_sensor_data
-                            sbp, dbp, map_val, wf = process_sensor_data(
-                                ecg_32s, ppg_32s, NIBP['sys'], NIBP['dias'], NIBP['mean'])
-                            # 生理合理性闸门：不合理输出不写入面板，避免显示 -223 这类值
-                            _valid = (80 <= sbp <= 200 and 40 <= dbp <= 120
-                                      and sbp - dbp >= 15)
+
+                            if MODEL_KIND == 'ppg2abp':
+                                # PPG2ABP：只要 PPG，8.2s 窗口 ×3 平均（与原版 BUFFER_SIZE=3 一致）
+                                from ppg2abp_bridge import predict_bp_avg
+                                sbp, dbp, map_val, _rows, wf = predict_bp_avg(
+                                    ppg_vals, window=820, k=3)
+                                _raw = (sbp, dbp, map_val)
+                                if CALIB:
+                                    sbp, dbp, map_val = CALIB.apply_triplet(sbp, dbp, map_val)
+                                print(f"  [模型] PPG2ABP 原始 {_raw[0]:.1f}/{_raw[1]:.1f}/{_raw[2]:.1f}"
+                                      + (f" → 校准后 {sbp:.1f}/{dbp:.1f}/{map_val:.1f}" if CALIB else ""))
+                                _valid = (not CALIB.clamp(sbp, dbp)) if CALIB else (
+                                    80 <= sbp <= 200 and 40 <= dbp <= 120 and sbp - dbp >= 15)
+                            else:
+                                ecg_win = np.array([v for _, v in list(ecg_ts_buffer)[-_win*FS:]])
+                                ppg_win = ppg_vals[-_win*PPG_FS:]
+                                from abp_sensor_bridge import process_sensor_data
+                                sbp, dbp, map_val, wf = process_sensor_data(
+                                    ecg_win, ppg_win, NIBP['sys'], NIBP['dias'], NIBP['mean'])
+                                _valid = (80 <= sbp <= 200 and 40 <= dbp <= 120
+                                          and sbp - dbp >= 15)
+
                             if _valid:
                                 with model_lock:
-                                    model_results = {'sbp': round(sbp,1), 'dbp': round(dbp,1), 'map': round(map_val,1), 'waveform': wf.tolist()[:500]}
+                                    model_results = {'sbp': round(sbp,1), 'dbp': round(dbp,1),
+                                                     'map': round(map_val,1),
+                                                     'waveform': wf.tolist()[:500]}
                                 print(f"  [模型] cNIBP: SBP={sbp:.1f} DBP={dbp:.1f} MAP={map_val:.1f}")
                             else:
-                                print(f"  [模型] 输出越界（SBP={sbp:.1f} DBP={dbp:.1f} MAP={map_val:.1f}），已丢弃"
-                                      f"；面板保留演示值。模拟模式下 ECG/PPG 非同一受试者，PAT 无意义属预期。")
+                                print(f"  [模型] 输出越界（SBP={sbp:.1f} DBP={dbp:.1f} MAP={map_val:.1f}），已丢弃")
                         except Exception as e:
                             print(f"  [模型] 错误: {e}")
                             import traceback
@@ -1214,10 +1231,28 @@ def main():
                         help='串口波特率（默认 115200）')
     parser.add_argument('--http-port', type=int, default=SERVER_PORT,
                         help=f'Web 服务端口（默认 {SERVER_PORT}）')
+    parser.add_argument('--model', choices=['abpimputation', 'ppg2abp'],
+                        default='abpimputation',
+                        help='血压模型：abpimputation（需 ECG+PPG）或 ppg2abp（只要 PPG，推荐）')
+    parser.add_argument('--no-calib', action='store_true', help='PPG2ABP 模式忽略个体校准')
+    parser.add_argument('--calib-file', default=None, help='校准文件路径')
     parser.add_argument('--nibp-sys', type=float, default=120.0, help='袖带收缩压校准值')
     parser.add_argument('--nibp-dias', type=float, default=80.0, help='袖带舒张压校准值')
     parser.add_argument('--nibp-mean', type=float, default=None, help='袖带平均压，默认 (sys+2*dias)/3')
     args = parser.parse_args()
+
+    global MODEL_KIND, CALIB
+    MODEL_KIND = args.model
+    if args.model == 'ppg2abp' and not args.no_calib:
+        try:
+            from bp_calibration import BPCalibration
+            CALIB = BPCalibration.load(args.calib_file)
+            if CALIB:
+                print(f"[校准] 已加载：{CALIB.describe()}")
+            else:
+                print("[校准] 未找到 calib.json，输出为模型原始值（建议先跑 --calib 100/66）")
+        except Exception as e:
+            print(f"[校准] 加载失败：{e}")
 
     NIBP['sys'] = args.nibp_sys
     NIBP['dias'] = args.nibp_dias
