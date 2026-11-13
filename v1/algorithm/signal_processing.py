@@ -267,3 +267,42 @@ def parse_frame(buf: bytes):
         r = parse_temp_packet_v4(buf)
         return ('temp', r) if r is not None else None
     return None
+
+
+# ---------------------------------------------------------------------------
+# I) FFT Gate 频域门控去噪（对应 ecg-denoise-lab 的 D1 方法）
+#    整窗 FFT → 只保留 [lo, hi] 频带 → IFFT。
+#    干电极最典型的问题是 50Hz 工频与高频肌电，落在 40Hz 以上，
+#    一刀切掉后 R 波才浮得出来。
+# ---------------------------------------------------------------------------
+
+def fft_gate(sig, fs: int = 250, lo: float = 0.5, hi: float = 40.0,
+             taper: bool = True):
+    """对整段信号做频域门控滤波。
+
+    Args:
+        sig: 一维信号。
+        fs: 采样率。
+        lo, hi: 保留频带（Hz）。
+        taper: 是否加 Hann 窗抑制截断泄漏（会按窗均值补偿幅度）。
+
+    Returns:
+        与输入等长的滤波结果。
+    """
+    x = np.asarray(sig, dtype=np.float64)
+    n = x.size
+    if n < 16:
+        return x.copy()
+
+    w = np.hanning(n) if taper else np.ones(n)
+    spec = np.fft.rfft(x * w)
+    freqs = np.fft.rfftfreq(n, 1.0 / fs)
+    keep = (freqs >= lo) & (freqs <= hi)
+    spec[~keep] = 0.0
+    y = np.fft.irfft(spec, n=n)
+
+    if taper:
+        m = float(np.mean(w))
+        if m > 1e-9:
+            y = y / m
+    return y

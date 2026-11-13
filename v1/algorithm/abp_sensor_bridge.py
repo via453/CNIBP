@@ -50,6 +50,7 @@ from signal_processing import (          # noqa: E402
     detect_ppg_peaks,
     calculate_pat,
     calculate_hr_from_ecg,
+    fft_gate,
 )
 
 # ---------------------------------------------------------------------------
@@ -145,6 +146,12 @@ def process_signals(
     Returns:
         (ecg_100hz, hr_bpm, pat_median_ms, pat_std_ms)
     """
+    # 说明：这里不对 ECG 做整窗频域门控。
+    # detect_r_peaks 内部已有 5–15Hz 带通，50Hz 工频本来就会被滤掉；
+    # 实测（干净 / 50Hz+肌电+漂移 / 强运动伪迹）HR 都是 72.3，稳定；
+    # 反之先做 FFT Gate 会把 QRS 抹宽、峰值数从 39 掉到 16，反而拖累 PAT 配对。
+    # 去噪留给「可视化」与「模型 ECG 通道」，见 v1/tools/waveform_scope.html。
+
     # Resample ECG to match PPG rate
     ecg_100hz = resample_ecg(ecg_250hz, orig_fs=ECG_FS, target_fs=TARGET_FS)
 

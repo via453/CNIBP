@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CNIBP 波形示波器 · 加窗去噪版</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --fg:#1f2328; --mut:#5b6470; --line:#dfe3e8;
+    --blue:#0969da; --bluebg:#eef5fd; --ok:#1a7f37; --okbg:#e9f6ec;
+    --warn:#9a6700; --warnbg:#fff7e6; --bad:#b42318; --badbg:#fdecea;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:18px 20px 40px}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--mut);font-size:12.5px;margin:0 0 14px}
+  .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--card);
+       border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px}
+  button{font:inherit;padding:6px 14px;border-radius:7px;border:1px solid var(--line);
+         background:#fff;color:var(--fg);cursor:pointer}
+  button:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
+  button:disabled{opacity:.45;cursor:default}
+  button.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+  button.primary:hover:not(:disabled){background:#0857b3;color:#fff}
+  select{font:inherit;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:#fff}
+  .pill{font-size:12px;padding:2px 9px;border-radius:999px;background:#eef1f4;color:var(--mut)}
+  .pill.on{background:var(--okbg);color:var(--ok)}
+  .pill.err{background:var(--badbg);color:var(--bad)}
+  .pill.warn{background:var(--warnbg);color:var(--warn)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px}
+  .card h2{font-size:13px;margin:0 0 6px;color:var(--mut);font-weight:600;display:flex;justify-content:space-between;gap:10px}
+  .card h2 .r{font-weight:400;color:var(--mut);font-variant-numeric:tabular-nums}
+  canvas{display:block;width:100%;height:132px;background:#fbfcfd;border-radius:6px}
+  canvas.tall{height:158px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+  .stat .k{color:var(--mut);font-size:11.5px}
+  .stat .v{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+  .stat .v small{font-size:11px;font-weight:400;color:var(--mut)}
+  .hint{background:var(--bluebg);border:1px solid #b6d7f5;border-left:4px solid var(--blue);
+        border-radius:8px;padding:10px 14px;font-size:13px;margin:12px 0 0}
+  .hint b{color:var(--blue)}
+  .hint ol{margin:6px 0 0;padding-left:20px}
+  .hint li{margin:3px 0}
+  .err{background:var(--badbg);border-color:#f5c2bd;border-left-color:var(--bad)}
+  .err b{color:var(--bad)}
+  code{font-family:Consolas,monospace;font-size:12.5px;background:#f3f5f8;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+  @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CNIBP 波形示波器 · 加窗去噪版</h1>
+  <p class="sub">直连 CH340 读 V4 三帧，XOR 校验。ECG 走 <b>FFT Gate（0.5–40 Hz 频域门控）</b>——即 ecg-denoise-lab 里的冠军方法，滚动窗口处理后显示，用于干电极下的心率观察。</p>
+
+  <div class="bar">
+    <button id="btnConnect" class="primary">连接串口</button>
+    <button id="btnStop" disabled>断开</button>
+    <button id="btnPause" disabled>暂停</button>
+    <button id="btnClear" disabled>清空</button>
+    <button id="btnCsv" disabled>导出 CSV</button>
+    <span style="width:1px;height:22px;background:var(--line)"></span>
+    <label class="pill">显示窗
+      <select id="selWin" style="margin-left:6px">
+        <option value="3">3 秒</option>
+        <option value="5" selected>5 秒</option>
+        <option value="8">8 秒</option>
+        <option value="10">10 秒</option>
+      </select>
+    </label>
+    <label class="pill">去噪窗
+      <select id="selDW" style="margin-left:6px">
+        <option value="4">4 秒</option>
+        <option value="6" selected>6 秒</option>
+        <option value="8">8 秒</option>
+      </select>
+    </label>
+    <span id="state" class="pill">未连接</span>
+    <span id="errPill" class="pill" style="display:none">校验错 0</span>
+  </div>
+
+  <div class="card">
+    <h2><span>① ECG 原始 · CH1（0xAA）</span><span class="r" id="ecgInfo">干电极噪声较大，正常现象</span></h2>
+    <canvas id="cvRaw"></canvas>
+  </div>
+
+  <div class="card">
+    <h2><span>② ECG 去噪 · FFT Gate 0.5–40Hz（滚动窗口）</span><span class="r" id="denInfo">等待数据…</span></h2>
+    <canvas id="cvDen" class="tall"></canvas>
+  </div>
+
+  <div class="card">
+    <h2><span>③ PPG · IR 交流分量（0xBB）</span><span class="r" id="ppgInfo"></span></h2>
+    <canvas id="cvPpg"></canvas>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="k">心率（去噪窗）</div><div class="v" id="sHr">—</div></div>
+    <div class="stat"><div class="k">窗口延迟</div><div class="v" id="sLag">—</div></div>
+    <div class="stat"><div class="k">ECG 帧率</div><div class="v" id="sEcg">—</div></div>
+    <div class="stat"><div class="k">PPG 帧率</div><div class="v" id="sPpg">—</div></div>
+    <div class="stat"><div class="k">去噪后峰峰值</div><div class="v" id="sPtp">—</div></div>
+    <div class="stat"><div class="k">噪声抑制</div><div class="v" id="sSnr">—</div></div>
+    <div class="stat"><div class="k">体温</div><div class="v" id="sTemp">—</div></div>
+    <div class="stat"><div class="k">样本总数</div><div class="v" id="sTotal">0</div></div>
+  </div>
+
+  <div class="hint">
+    <b>关于延迟：</b>干电极的原始 ECG 必然被工频与肌电淹没，单点看毫无意义，必须整窗做频域门控。
+    页面每 <b>0.5 秒</b>用最近「去噪窗」长度的数据重算一次，所以心率读数天然滞后约一个窗口
+    （选 6 秒窗 → 心率反映的是 3 秒前的平均）。这是算法性质决定的，不是卡顿。
+    <ol>
+      <li>要更「实时」就把去噪窗调到 4 秒，代价是低频分辨率下降、HR 抖动变大。</li>
+      <li>要看真实波形细节就点「导出 CSV」，拿 <code>t_ms,ecg_raw,ppg_ir</code> 回 ecg-denoise-lab 做完整离线分析。</li>
+      <li>PPG 是光电容积脉搏波，本身信噪比高，第 ③ 图基本可以直接看搏动。</li>
+    </ol>
+  </div>
+  <div class="hint err" id="hintErr" style="display:none"></div>
+</div>
+
+<script>
+(() => {
+  const LEN = {0xAA: 16, 0xBB: 17, 0xCC: 5};
+  const FS = 250;            // 固件 ECG 采样率
+  const st = {
+    port: null, reader: null, keep: false, paused: false,
+    buf: new Uint8Array(0),
+    ecg: [], ecgT: [], ppg: [], ppgT: [],
+    rec: [],                  // CSV 导出：{t, e, p}
+    nEcg: 0, nPpg: 0, nTemp: 0, nErr: 0,
+    temp: null, t0: performance.now(), lastStat: 0, lastDen: 0,
+    rateEcg: 0, ratePpg: 0, pEcg: 0, pPpg: 0, tPrev: 0,
+    den: { raw: null, clean: null, hr: null, lag: 0, snr: null },
+  };
+
+  const $ = id => document.getElementById(id);
+  const cRaw = $('cvRaw'), cDen = $('cvDen'), cPpg = $('cvPpg');
+  const xRaw = cRaw.getContext('2d'), xDen = cDen.getContext('2d'), xPpg = cPpg.getContext('2d');
+
+  const setState = (t, c) => { const el = $('state'); el.textContent = t; el.className = 'pill' + (c ? ' ' + c : ''); };
+  const showErr = m => { const el = $('hintErr'); el.style.display = 'block'; el.innerHTML = '<b>出错了：</b>' + m; };
+
+  // ================= 串口 =================
+  async function openPort() {
+    if (!('serial' in navigator)) {
+      showErr('当前浏览器不支持 Web Serial，请用 <code>Edge</code> 或 <code>Chrome</code> 打开本页。');
+      return;
+    }
+    try {
+      const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x1a86 }] });
+      await port.open({ baudRate: 115200, bufferSize: 65536 });
+      st.port = port; st.keep = true; st.paused = false;
+      ['btnConnect'].forEach(i => $(i).disabled = true);
+      ['btnStop', 'btnPause', 'btnClear', 'btnCsv'].forEach(i => $(i).disabled = false);
+      setState('已连接 · 115200', 'on');
+      $('hintErr').style.display = 'none';
+      readLoop();
+    } catch (e) {
+      if (String(e).indexOf('No port selected') >= 0) return;
+      showErr('打开串口失败：' + e.message + '（多半是别的程序还占着 COM 口）');
+    }
+  }
+
+  async function readLoop() {
+    const port = st.port;
+    while (st.keep && port.readable) {
+      st.reader = port.readable.getReader();
+      try {
+        while (st.keep) {
+          const { value, done } = await st.reader.read();
+          if (done) break;
+          if (value && value.length) push(value);
+        }
+      } catch (e) { if (st.keep) showErr('读取中断：' + e.message); }
+      finally { try { st.reader.releaseLock(); } catch (_) {} }
+    }
+  }
+
+  async function closePort() {
+    st.keep = false;
+    try { if (st.reader) await st.reader.cancel(); } catch (_) {}
+    try { if (st.port) await st.port.close(); } catch (_) {}
+    st.port = null;
+    $('btnConnect').disabled = false;
+    ['btnStop', 'btnPause'].forEach(i => $(i).disabled = true);
+    setState('已断开');
+  }
+
+  // ================= 解帧 =================
+  function push(chunk) {
+    const old = st.buf, buf = new Uint8Array(old.length + chunk.length);
+    buf.set(old, 0); buf.set(chunk, old.length);
+    st.buf = buf;
+    parse();
+  }
+
+  function parse() {
+    const buf = st.buf;
+    let i = 0;
+    const now = performance.now() - st.t0;
+
+    while (i < buf.length) {
+      const b = buf[i], L = LEN[b];
+      if (L === undefined) { i++; continue; }
+      if (buf.length - i < L) break;
+      let c = 0;
+      for (let k = 0; k < L - 1; k++) c ^= buf[i + k];
+      if (c !== buf[i + L - 1]) { st.nErr++; i++; continue; }
+
+      const dv = new DataView(buf.buffer, buf.byteOffset + i, L);
+      if (b === 0xAA) {
+        st.ecg.push(dv.getInt32(4, false) / 1000.0);
+        st.ecgT.push(now); st.nEcg++;
+      } else if (b === 0xBB) {
+        st.ppg.push(dv.getUint32(4, false));
+        st.ppgT.push(now); st.nPpg++;
+      } else {
+        st.temp = dv.getInt16(2, false) / 100.0; st.nTemp++;
+      }
+      i += L;
+    }
+    st.buf = buf.slice(i);
+
+    // 只保留最近 60 秒
+    const cut = now - 60000;
+    if (st.ecgT.length > 3000 && st.ecgT[0] < cut) {
+      let k = 0; while (k < st.ecgT.length && st.ecgT[k] < cut) k++;
+      st.ecg = st.ecg.slice(k); st.ecgT = st.ecgT.slice(k);
+    }
+    if (st.ppgT.length > 3000 && st.ppgT[0] < cut) {
+      let k = 0; while (k < st.ppgT.length && st.ppgT[k] < cut) k++;
+      st.ppg = st.ppg.slice(k); st.ppgT = st.ppgT.slice(k);
+    }
+  }
+
+  // ================= FFT（迭代基 2） =================
+  function fft(re, im, inverse) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = 2 * Math.PI / len * (inverse ? 1 : -1);
+      const wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let k = 0; k < len / 2; k++) {
+          const ur = re[i + k], ui = im[i + k];
+          const vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
+          const vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+          re[i + k] = ur + vr; im[i + k] = ui + vi;
+          re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+          const ncr = cr * wr - ci * wi;
+          ci = cr * wi + ci * wr; cr = ncr;
+        }
+      }
+    }
+    if (inverse) for (let i = 0; i < n; i++) { re[i] /= n; im[i] /= n; }
+  }
+
+  // ================= 去噪：FFT Gate（0.5–40Hz 门控） =================
+  // 与 ecg-denoise-lab 的 D1 方法同构：整窗 FFT → 只保留 0.5–40Hz 频带 → IFFT。
+  // 额外用 Hann 窗抑制截断泄漏，输出后补偿 0.5 的幅度损失。
+  function fftGate(x, lo, hi) {
+    const n = x.length;
+    let N = 1; while (N < n) N <<= 1;
+    const re = new Float64Array(N), im = new Float64Array(N);
+    const w = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      w[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (n - 1));
+      re[i] = x[i] * w[i];
+    }
+    fft(re, im, false);
+    const df = FS / N;
+    for (let k = 0; k < N; k++) {
+      const f = Math.abs(k <= N / 2 ? k * df : (k - N) * df);
+      if (f < lo || f > hi) { re[k] = 0; im[k] = 0; }
+    }
+    fft(re, im, true);
+    const out = new Float64Array(n);
+    for (let i = 0; i < n; i++) out[i] = re[i] / 0.5;   // 补偿 Hann 窗
+    return out;
+  }
+
+  // ================= 简单 Pan-Tompkins 式 R 波检测 =================
+  function detectR(x) {
+    const n = x.length;
+    // 5–15Hz 带通（对已 0.5–40Hz 的信号再窄带化，突出 QRS）
+    let N = 1; while (N < n) N <<= 1;
+    const re = new Float64Array(N), im = new Float64Array(N);
+    for (let i = 0; i < n; i++) re[i] = x[i];
+    fft(re, im, false);
+    const df = FS / N;
+    for (let k = 0; k < N; k++) {
+      const f = Math.abs(k <= N / 2 ? k * df : (k - N) * df);
+      if (f < 5 || f > 15) { re[k] = 0; im[k] = 0; }
+    }
+    fft(re, im, true);
+
+    // 微分平方 + 150ms 积分窗
+    const d = new Float64Array(n), sq = new Float64Array(n);
+    for (let i = 1; i < n; i++) d[i] = re[i] - re[i - 1];
+    let mx = 0;
+    for (let i = 0; i < n; i++) { sq[i] = d[i] * d[i]; if (sq[i] > mx) mx = sq[i]; }
+    const win = Math.round(0.15 * FS), integ = new Float64Array(n);
+    let acc = 0;
+    for (let i = 0; i < n; i++) {
+      acc += sq[i];
+      if (i >= win) acc -= sq[i - win];
+      integ[i] = acc / win;
+    }
+    let mean = 0; for (let i = 0; i < n; i++) mean += integ[i]; mean /= n;
+    const thr = mean * 3.0;
+    const minD = Math.round(0.28 * FS);
+    const peaks = [];
+    let last = -1e9;
+    for (let i = 1; i < n - 1; i++) {
+      if (integ[i] > thr && integ[i] >= integ[i - 1] && integ[i] >= integ[i + 1] && i - last > minD) {
+        peaks.push(i); last = i;
+      }
+    }
+    return peaks;
+  }
+
+  function hrFromPeaks(peaks) {
+    if (peaks.length < 3) return { hr: null, rr: null };
+    const rr = [];
+    for (let i = 1; i < peaks.length; i++) rr.push((peaks[i] - peaks[i - 1]) / FS);
+    rr.sort((a, b) => a - b);
+    const med = rr[Math.floor(rr.length / 2)];
+    if (!(med > 0.25 && med < 2.0)) return { hr: null, rr: med };
+    return { hr: 60 / med, rr: med };
+  }
+
+  // ================= 绘图 =================
+  function fit(cv, ctx) {
+    const dpr = window.devicePixelRatio || 1;
+    const r = cv.getBoundingClientRect();
+    if (cv.width !== Math.round(r.width * dpr) || cv.height !== Math.round(r.height * dpr)) {
+      cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    return r;
+  }
+
+  function grid(ctx, W, H, pad) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.strokeStyle = '#eceff3'; ctx.lineWidth = 1;
+    for (let gx = 0; gx <= 10; gx++) {
+      const x = pad + (W - 2 * pad) * gx / 10;
+      ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, H - pad); ctx.stroke();
+    }
+    for (let gy = 0; gy <= 4; gy++) {
+      const y = pad + (H - 2 * pad) * gy / 4;
+      ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W - pad, y); ctx.stroke();
+    }
+  }
+
+  function plotArr(cv, ctx, arr, color, fixed) {
+    const r = fit(cv, ctx), W = r.width, H = r.height, pad = 6;
+    grid(ctx, W, H, pad);
+    if (!arr || arr.length < 2) return null;
+    let min, max;
+    if (fixed) { min = fixed[0]; max = fixed[1]; }
+    else {
+      min = Infinity; max = -Infinity;
+      for (let i = 0; i < arr.length; i++) { const v = arr[i]; if (v < min) min = v; if (v > max) max = v; }
+    }
+    let span = max - min; if (span < 1e-9) span = 1;
+    const mid = (min + max) / 2;
+    const scale = (H - 2 * pad) * 0.42 / (span * 0.5);
+    ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.beginPath();
+    const n = arr.length;
+    for (let k = 0; k < n; k++) {
+      const x = pad + (W - 2 * pad) * (k / (n - 1));
+      let y = H / 2 - (arr[k] - mid) * scale;
+      if (y < pad) y = pad; if (y > H - pad) y = H - pad;
+      k ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+    return { min, max };
+  }
+
+  // 画 R 波标记
+  function markPeaks(cv, ctx, peaks, n) {
+    const r = cv.getBoundingClientRect();
+    const W = r.width, H = r.height, pad = 6;
+    ctx.fillStyle = 'rgba(26,127,55,.85)';
+    for (const p of peaks) {
+      const x = pad + (W - 2 * pad) * (p / (n - 1));
+      ctx.beginPath(); ctx.arc(x, H - pad - 4, 2.4, 0, 2 * Math.PI); ctx.fill();
+    }
+  }
+
+  // ================= 主渲染 =================
+  function render(now) {
+    requestAnimationFrame(render);
+    if (st.paused) return;
+
+    // ① 原始 ECG
+    const win = Number($('selWin').value);
+    const nShow = Math.min(st.ecg.length, Math.round(win * FS));
+    const rawSeg = nShow > 1 ? st.ecg.slice(-nShow) : null;
+    const eRaw = plotArr(cRaw, xRaw, rawSeg, '#d1242f');
+    if (eRaw) $('ecgInfo').textContent = `峰峰 ${(eRaw.max - eRaw.min).toFixed(0)} · 去噪前`;
+
+    // ③ PPG（去 DC）
+    const nP = Math.min(st.ppg.length, Math.round(win * 100));
+    let ppgSeg = nP > 10 ? st.ppg.slice(-nP) : null;
+    if (ppgSeg) {
+      const n = ppgSeg.length, w = Math.max(5, Math.round(n / 12));
+      const out = new Array(n); let acc = 0;
+      for (let k = 0; k < n; k++) {
+        acc += ppgSeg[k];
+        if (k >= w) acc -= ppgSeg[k - w];
+        out[k] = ppgSeg[k] - acc / Math.min(k + 1, w);
+      }
+      ppgSeg = out;
+    }
+    const ePpg = plotArr(cPpg, xPpg, ppgSeg, '#0969da');
+    if (ePpg) $('ppgInfo').textContent = `IR≈${st.ppg[st.ppg.length - 1]} · 交流峰峰 ${(ePpg.max - ePpg.min).toFixed(0)}`;
+
+    // ② 去噪（每 500ms 重算一次）
+    if (now - st.lastDen > 500 && st.ecg.length > 600) {
+      st.lastDen = now;
+      const dw = Number($('selDW').value);
+      const nW = Math.round(dw * FS);
+      if (st.ecg.length >= nW) {
+        const seg = st.ecg.slice(-nW);
+        const clean = fftGate(Float64Array.from(seg), 0.5, 40);
+        // 丢掉窗两端的边缘效应，显示中间 80%
+        const a = Math.round(nW * 0.1), b = Math.round(nW * 0.9);
+        const view = Array.from(clean.subarray(a, b));
+        const peaksC = detectR(Float64Array.from(clean.subarray(a, b)));
+        const { hr } = hrFromPeaks(peaksC);
+
+        // 噪声抑制：原始 vs 去噪 的 std 比（dB）
+        let mr = 0, mc = 0;
+        for (let i = 0; i < nW; i++) { mr += seg[i]; mc += clean[i]; }
+        mr /= nW; mc /= nW;
+        let vr = 0, vc = 0;
+        for (let i = a; i < b; i++) { vr += (seg[i] - mr) ** 2; vc += (clean[i] - mc) ** 2; }
+        const snr = 10 * Math.log10((vr / (b - a) + 1e-9) / (vc / (b - a) + 1e-9));
+
+        st.den = { raw: seg, clean: view, peaks: peaksC, hr, lag: dw, snr, n: view.length };
+        plotArr(cDen, xDen, view, '#1a7f37');
+        markPeaks(cDen, xDen, peaksC, view.length);
+
+        $('denInfo').textContent = `${dw}s 窗 · ${peaksC.length} 个 R 波 · 每 0.5s 刷新`;
+        $('sHr').innerHTML = hr ? `${hr.toFixed(0)} <small>bpm</small>` : '—';
+        $('sLag').innerHTML = `${(dw / 2).toFixed(1)} <small>s</small>`;
+        $('sPtp').textContent = (Math.max(...view) - Math.min(...view)).toFixed(0);
+        $('sSnr').textContent = snr.toFixed(1) + ' dB';
+      }
+    }
+
+    // 统计
+    if (now - st.lastStat > 500) {
+      const dt = (now - st.tPrev) / 1000;
+      if (st.tPrev && dt > 0.2) {
+        st.rateEcg = (st.nEcg - st.pEcg) / dt;
+        st.ratePpg = (st.nPpg - st.pPpg) / dt;
+        st.pEcg = st.nEcg; st.pPpg = st.nPpg; st.tPrev = now;
+      } else if (!st.tPrev) { st.tPrev = now; st.pEcg = st.nEcg; st.pPpg = st.nPpg; }
+      st.lastStat = now;
+
+      $('sEcg').textContent = st.rateEcg ? st.rateEcg.toFixed(0) + '/s' : '—';
+      $('sPpg').textContent = st.ratePpg ? st.ratePpg.toFixed(0) + '/s' : '—';
+      $('sTemp').textContent = st.temp == null ? '—' : st.temp.toFixed(2) + ' ℃';
+      $('sTotal').textContent = st.nEcg + st.nPpg + st.nTemp;
+      if (st.nErr > 0) {
+        const p = $('errPill');
+        p.style.display = '';
+        p.textContent = '校验错 ' + st.nErr;
+        p.className = 'pill' + (st.nErr / Math.max(1, st.nEcg) > 0.05 ? ' err' : ' warn');
+      }
+    }
+  }
+
+  // ================= 导出 CSV =================
+  function exportCsv() {
+    if (!st.ecg.length) { return; }
+    // 用 ECG 时间轴对齐 PPG（各自最近值）
+    const lines = ['t_ms,ecg_raw,ppg_ir'];
+    let j = 0;
+    for (let i = 0; i < st.ecg.length; i++) {
+      const t = Math.round(st.ecgT[i]);
+      while (j + 1 < st.ppgT.length && st.ppgT[j + 1] <= st.ecgT[i]) j++;
+      lines.push(`${t},${st.ecg[i].toFixed(4)},${st.ppg.length ? st.ppg[j] : ''}`);
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'cnibp_capture_' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+
+  // ================= 事件 =================
+  $('btnConnect').onclick = openPort;
+  $('btnStop').onclick = closePort;
+  $('btnPause').onclick = () => { st.paused = !st.paused; $('btnPause').textContent = st.paused ? '继续' : '暂停'; };
+  $('btnCsv').onclick = exportCsv;
+  $('btnClear').onclick = () => {
+    st.ecg = []; st.ecgT = []; st.ppg = []; st.ppgT = [];
+    st.nEcg = st.nPpg = st.nTemp = st.nErr = 0;
+    st.pEcg = 0; st.pPpg = 0; st.tPrev = 0; st.lastDen = 0;
+    st.den = { raw: null, clean: null, hr: null, lag: 0, snr: null };
+    $('errPill').style.display = 'none';
+    [$('sHr'), $('sLag'), $('sPtp'), $('sSnr')].forEach(e => e.textContent = '—');
+    $('denInfo').textContent = '等待数据…';
+  };
+  window.addEventListener('beforeunload', () => { st.keep = false; });
+
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>
