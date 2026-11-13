@@ -343,7 +343,7 @@ void ADS1292_SET_REGBUFF(void)
     ADS1292_REG[REG_RLD_SENS] |= (g_ads_rld.Rld2P          << 2);
     ADS1292_REG[REG_RLD_SENS] |= (g_ads_rld.Rld1N          << 1);
     ADS1292_REG[REG_RLD_SENS] |=  g_ads_rld.Rld1P;
-    ADS1292_REG[REG_RLD_SENS] |= 0xC0; /* 设置默认保留位 */
+    ADS1292_REG[REG_RLD_SENS] |= 0xC0; /* 实测该位写 0 会让工频比从 7.37 涨到 65.9 */
 
     /* LOFF_SENS: [7:6]=0(保留) [5]=Flip2 [4]=Flip1 [3:0]=通道脱落检测 */
     ADS1292_REG[REG_LOFF_SENS]  = 0x00;

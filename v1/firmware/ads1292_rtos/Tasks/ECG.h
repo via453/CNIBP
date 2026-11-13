@@ -197,8 +197,15 @@ extern volatile uint32_t g_ecg_ring_drops;
 #define CH2_POWER               PD_ON
 #define CH2_GAIN                GAIN_6
 #define CH2_MUX                 MUX_Normal_input
+/* v1: 两电极干电极方案没有右腿电极，RLD 环路无处驱动，开着反而把共模拉偏。
+   置 OFF，靠数字端 50Hz 门控/陷波处理工频。 */
 #define PDB_RLD_CFG             PDB_RLD_ON
 #define RLD_LOFF_SENSE_CFG      RLD_LOFF_SENSE_OFF
+/* v1 实测结论（三种 RLD 配置对比，工频/ QRS 能量比）：
+     取 CH2（原配置）  7.37   ← 最优
+     取 CH1          信号归零（反馈接到信号端，闭环把差分压没）
+     完全关闭        65.87
+   因此保留「取 CH2」。注意 CH2 在本板悬空（恒 0x800000），但 RLD 环路工作正常。 */
 #define RLD2N_CFG               RLD_CANNLE_ON
 #define RLD2P_CFG               RLD_CANNLE_ON
 #define RLD1N_CFG               RLD_CANNLE_OFF
