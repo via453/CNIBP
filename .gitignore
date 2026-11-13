@@ -22,3 +22,5 @@ cNIBP*.pdf
 
 # 个体校准数据（含受试者血压读数，属运行时私有配置）
 v1/algorithm/calib.json
+v1/algorithm/calib_points.json
+v1/algorithm/_calib_points.json
