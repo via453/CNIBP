@@ -72,18 +72,25 @@ extern volatile uint32_t g_ecg_ring_drops;
 
 /* ================================ 寄存器地址定义区 ================================ */
 
-#define REG_ID          0   /**< ID 寄存器（只读） */
-#define REG_CONFIG1     1   /**< 配置寄存器1 */
-#define REG_CONFIG2     2   /**< 配置寄存器2 */
-#define REG_LOFF        3   /**< 导联脱落控制寄存器 */
-#define REG_CH1SET      4   /**< 通道1配置寄存器 */
-#define REG_CH2SET      5   /**< 通道2配置寄存器 */
-#define REG_RLD_SENS    6   /**< 右腿驱动选择寄存器 */
-#define REG_LOFF_SENS   7   /**< 导联脱落检测选择寄存器 */
-#define REG_LOFF_STAT   8   /**< 导联脱落状态寄存器（只读） */
-#define REG_RESP1       9   /**< 呼吸测量控制寄存器1 */
-#define REG_RESP2       10  /**< 呼吸测量控制寄存器2 */
-#define REG_GPIO        11  /**< GPIO控制寄存器 */
+/* 注意：ADS1292 的真实寄存器地址从 0x03 起是 CONFIG3，不是 LOFF。
+   原版这里整体错位一格（缺 CONFIG3），导致：
+     - "LOFF=0x10" 实际写进了 CONFIG3 → PD_RLD=0、PD_REFBUF=0
+       → 右腿驱动断电、基准缓冲关闭 → 共模抑制失效 → 50Hz 工频灌入（实测主导）
+     - CH1SET/CH2SET/RLD_SENS 全部落到前一个寄存器上，通道增益与 MUX 从未真正配置
+   v1 按数据手册 SBAS502 修正为下列地址。 */
+#define REG_ID          0x00 /**< ID 寄存器（只读） */
+#define REG_CONFIG1     0x01 /**< 配置寄存器1：数据速率 */
+#define REG_CONFIG2     0x02 /**< 配置寄存器2：测试信号/基准/时钟 */
+#define REG_CONFIG3     0x03 /**< 配置寄存器3：PD_RLD / RLDREF_INT / PD_REFBUF */
+#define REG_LOFF        0x04 /**< 导联脱落控制寄存器 */
+#define REG_CH1SET      0x05 /**< 通道1配置寄存器 */
+#define REG_CH2SET      0x06 /**< 通道2配置寄存器 */
+#define REG_RLD_SENS    0x07 /**< 右腿驱动选择寄存器 */
+#define REG_LOFF_SENS   0x08 /**< 导联脱落检测选择寄存器 */
+#define REG_LOFF_STAT   0x09 /**< 导联脱落状态寄存器（只读） */
+#define REG_RESP1       0x0A /**< 呼吸测量控制寄存器1 */
+#define REG_RESP2       0x0B /**< 呼吸测量控制寄存器2 */
+#define REG_GPIO        0x0C /**< GPIO控制寄存器 */
 
 /* ================================ 寄存器字段值定义区 ================================ */
 

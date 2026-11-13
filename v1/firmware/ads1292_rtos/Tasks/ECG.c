@@ -310,6 +310,16 @@ void ADS1292_SET_REGBUFF(void)
     ADS1292_REG[REG_CONFIG2] |= (g_ads_cfg2.Int_Test       << 1);
     ADS1292_REG[REG_CONFIG2] |= 0x81; /* 设置默认保留位 */
 
+    /* CONFIG3（新增）：干电极最关键的一位在这里。
+       [7] PD_RLD=1      右腿驱动缓冲器上电——不开就没有共模反馈，50Hz 会灌满
+       [6] RLD_LOFF_SENS=0
+       [4] RLD_MEAS=0    不把 RLD 引到通道上
+       [3] RLDREF_INT=1  RLD 参考内部产生
+       [2] PD_REFBUF=1   内部基准缓冲上电
+       [1] VREF=0        2.42V（对应 VREF_242V）
+       值 = 1000 1100b = 0x8C */
+    ADS1292_REG[REG_CONFIG3] = 0x8C;
+
     /* LOFF: [7:5]=比较器阈值 [4]=1(保留) [3:2]=电流幅值 [1]=0(保留) [0]=检测方式(0=DC) */
     ADS1292_REG[REG_LOFF] = 0x10;
 
