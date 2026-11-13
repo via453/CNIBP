@@ -287,9 +287,30 @@ def process_sensor_data(
     ecg_100hz, hr, pat_median, pat_std = process_signals(ecg_250hz, ppg_100hz)
     print(f"[bridge] HR = {hr:.1f} bpm | PAT = {pat_median:.1f} ± {pat_std:.1f} ms")
 
+    # 信号质量闸门：HR 或 PAT 不合理时直接放弃本次推理。
+    # 否则模型会拿「50Hz 工频 + 常数 PAT」硬算，输出 -43452 mmHg 这种值，
+    # 既没意义也掩盖了真正的原因（电极没贴 / 手指没放）。
+    if not (30.0 <= hr <= 220.0) or pat_median <= 0.0:
+        raise ValueError(
+            f"信号质量不足（HR={hr:.1f} bpm, PAT={pat_median:.1f} ms）："
+            f"请确认 ECG 电极贴合皮肤、手指完全覆盖 PPG 传感器")
+
+    # --- 尺度对齐 ---
+    # 模型内部的 ECG 通道做的是 (x - mean)/std，训练集统计量为
+    # mean≈0.176、std≈1.39（约 1 mV 量级的归一化波形）。
+    # 而 STM32 送上来的是 ADS1292 的 24 位原始码值（几千~几十万），
+    # 直接喂进去等于把模型推到分布外（实测输出越界）。
+    # 这里在「明显不是训练尺度」(std > 5) 时做窗口 z-score 并映射到训练统计量；
+    # 模拟模式用的记录本身已是训练尺度，不会被改动。
+    ecg_for_model = ecg_100hz
+    _std = float(np.std(ecg_for_model))
+    if _std > 5.0:
+        ecg_for_model = ((ecg_for_model - float(np.mean(ecg_for_model))) / _std) * 1.3935 + 0.176
+        print(f"[bridge] ECG 原始尺度 std={_std:.1f} → 已归一到训练尺度 (z-score)")
+
     # --- synthesise model input ---
     X = synthesize_channels(
-        ecg_100hz, ppg_100hz,
+        ecg_for_model, ppg_100hz,
         hr, pat_median, pat_std,
         nibp_sys, nibp_dias, nibp_mean,
     )

@@ -732,58 +732,67 @@ class SerialReader:
             raise IOError(f"无法打开串口 {self.port}，错误: {e}")
 
     def read_frame(self):
-        """
-        读取 V4 三通道协议帧。
+        """从内部缓冲里解析一帧 V4 协议数据。
+
+        v1 重写：原实现每帧要做 2 次阻塞 read()，遇到杂字节还要回上层 sleep(1ms)，
+        在 250Hz + 100Hz（约 4000 B/s）下只能解析出 ~31 帧/秒，缓冲直接溢出。
+        改为「一次批量读、缓冲区里滑窗找帧头」，CPU 开销降到最低。
+
         返回: dict or None
           ecg:  {'type':'ecg', 'value':mV, 'timestamp':ms}
           ppg:  {'type':'ppg', 'ir':int, 'red':int, 'timestamp':ms}
           temp: {'type':'temp', 'value':°C}
         """
-        hdr = self.ser.read(1) if self.ser else b''
-        if not hdr:
+        if not self.ser:
             return None
-        b = hdr[0]
 
-        if b == 0xAA:  # ECG 16B
-            rest = self.ser.read(ECG_PACKET_LEN - 1)
-            if len(rest) < ECG_PACKET_LEN - 1:
-                return None
-            pkt = hdr + rest
-            c = 0
-            for x in pkt[:ECG_PACKET_LEN-1]:
-                c ^= x
-            if c != pkt[ECG_PACKET_LEN-1]:
-                return None
-            uV = struct.unpack('>i', pkt[4:8])[0]
-            ts_ms = struct.unpack('>I', pkt[11:15])[0]
-            return {'type': 'ecg', 'value': uV / 1000.0, 'timestamp': ts_ms}
+        lens = {0xAA: ECG_PACKET_LEN, 0xBB: PPG_PACKET_LEN, 0xCC: TEMP_PACKET_LEN}
 
-        elif b == 0xBB:  # PPG 17B
-            rest = self.ser.read(PPG_PACKET_LEN - 1)
-            if len(rest) < PPG_PACKET_LEN - 1:
-                return None
-            pkt = hdr + rest
-            c = 0
-            for x in pkt[:PPG_PACKET_LEN-1]:
-                c ^= x
-            if c != pkt[PPG_PACKET_LEN-1]:
-                return None
-            ir = struct.unpack('>I', pkt[4:8])[0]
-            red = struct.unpack('>I', pkt[8:12])[0]
-            ts_ms = struct.unpack('>I', pkt[12:16])[0]
-            return {'type': 'ppg', 'ir': ir, 'red': red, 'timestamp': ts_ms}
+        while True:
+            buf = self.buffer
+            i = 0
+            need_more = False
 
-        elif b == 0xCC:  # TEMP 5B
-            rest = self.ser.read(TEMP_PACKET_LEN - 1)
-            if len(rest) < TEMP_PACKET_LEN - 1:
-                return None
-            pkt = hdr + rest
-            if (pkt[0] ^ pkt[1] ^ pkt[2] ^ pkt[3]) != pkt[4]:
-                return None
-            raw = struct.unpack('>h', pkt[2:4])[0]
-            return {'type': 'temp', 'value': raw / 100.0}
+            while i < len(buf):
+                b = buf[i]
+                L = lens.get(b)
+                if L is None:
+                    i += 1                      # 杂字节，跳过
+                    continue
+                if len(buf) - i < L:
+                    need_more = True            # 半帧，等后续字节
+                    break
 
-        return None
+                pkt = buf[i:i + L]
+                c = 0
+                for x in pkt[:L - 1]:
+                    c ^= x
+                if c != pkt[L - 1]:
+                    i += 1                      # 校验失败：多半是假帧头，往后挪一位重找
+                    continue
+
+                self.buffer = buf[i + L:]
+                if b == 0xAA:
+                    uV = struct.unpack('>i', pkt[4:8])[0]
+                    ts_ms = struct.unpack('>I', pkt[11:15])[0]
+                    return {'type': 'ecg', 'value': uV / 1000.0, 'timestamp': ts_ms}
+                if b == 0xBB:
+                    ir = struct.unpack('>I', pkt[4:8])[0]
+                    red = struct.unpack('>I', pkt[8:12])[0]
+                    ts_ms = struct.unpack('>I', pkt[12:16])[0]
+                    return {'type': 'ppg', 'ir': ir, 'red': red, 'timestamp': ts_ms}
+                raw = struct.unpack('>h', pkt[2:4])[0]
+                return {'type': 'temp', 'value': raw / 100.0}
+
+            # 丢掉已扫描过的无用前缀，避免缓冲无限增长
+            if i > 0 and i <= len(buf):
+                self.buffer = buf[i:]
+
+            n = getattr(self.ser, 'in_waiting', 0)
+            chunk = self.ser.read(n if n > 0 else 1)
+            if not chunk:
+                return None
+            self.buffer += chunk
 
     def close(self):
         """关闭串口。"""
@@ -884,28 +893,32 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
             try:
                 # ---- 读取样本 ----
                 if mode == 'serial' and reader:
-                    try:
-                        frame = reader.read_frame()
-                    except Exception as e:
-                        print(f"  [错误] 串口读取异常: {e}")
-                        time.sleep(0.01)
-                        continue
-                    if frame is None:
+                    # v1: 每轮把串口里已到达的帧全部排干再走后续流程。
+                    # 原来每轮只读 1 帧，而每轮末尾的 SSE 推送要 ~18ms，
+                    # 结果 250Hz 的 ECG 只能收进 ~57 帧/秒，缓冲直接溢出。
+                    new_samples = []
+                    n_frames = 0
+                    while n_frames < 512:
+                        try:
+                            frame = reader.read_frame()
+                        except Exception as e:
+                            print(f"  [错误] 串口读取异常: {e}")
+                            break
+                        if frame is None:
+                            break
+                        n_frames += 1
+                        ts_now = time.time()
+                        if frame['type'] == 'ecg':
+                            ecg_ts_buffer.append((frame.get('timestamp', ts_now), frame['value']))
+                            new_samples.append(frame['value'])
+                        elif frame['type'] == 'ppg':
+                            ppg_ts_buffer.append((frame.get('timestamp', ts_now), frame['ir']))
+                            g_latest_spo2 = 98
+                        elif frame['type'] == 'temp':
+                            g_latest_temp = frame['value']
+                    if n_frames == 0:
                         time.sleep(0.001)
                         continue
-                    ts_now = time.time()
-                    if frame['type'] == 'ecg':
-                        ecg_ts_buffer.append((frame.get('timestamp', ts_now), frame['value']))
-                        new_samples = [frame['value']]
-                    elif frame['type'] == 'ppg':
-                        ppg_ts_buffer.append((frame.get('timestamp', ts_now), frame['ir']))
-                        new_samples = []
-                        g_latest_spo2 = 98
-                    elif frame['type'] == 'temp':
-                        g_latest_temp = frame['value']
-                        new_samples = []
-                    else:
-                        new_samples = []
                 else:
                     # 模拟模式：同时生成 ECG + PPG
                     new_samples = simulator.generate(HOP_SIZE)
@@ -967,11 +980,21 @@ def data_pipeline(mode='simulation', port='COM37', baudrate=115200):
                         nonlocal model_results
                         try:
                             ecg_32s = np.array([v for _, v in list(ecg_ts_buffer)[-MODEL_WINDOW_SEC*FS:]])
-                            ppg_all = np.array([v for _, v in list(ppg_ts_buffer)])
-                            if len(ppg_all) > MODEL_WINDOW_SEC * PPG_FS * 1.5:
-                                ppg_all = scipy_signal.resample_poly(ppg_all, 2, 5)
-                                print(f"  [模型] PPG 降采样 250→100Hz，样本 {len(ppg_all)}")
-                            ppg_32s = ppg_all[-MODEL_WINDOW_SEC*PPG_FS:]
+
+                            # v1: 是否降采样必须看「实际到达速率」，不能看缓冲长度。
+                            # 缓冲是 60 秒的 deque，按 100Hz 满量就是 6000 点，
+                            # 原来用 len > 32*100*1.5 判断会一直成立，把本来 100Hz 的
+                            # PPG 又压成 40Hz（实测日志 "样本 2400"）。
+                            ppg_list = list(ppg_ts_buffer)
+                            ppg_vals = np.array([v for _, v in ppg_list], dtype=np.float64)
+                            ppg_ts = np.array([t for t, _ in ppg_list], dtype=np.float64)
+                            ppg_rate = PPG_FS
+                            if len(ppg_vals) >= 20 and ppg_ts[-1] > ppg_ts[0]:
+                                ppg_rate = (len(ppg_vals) - 1) / (ppg_ts[-1] - ppg_ts[0])
+                            if ppg_rate > PPG_FS * 1.5:
+                                ppg_vals = scipy_signal.resample_poly(ppg_vals, 2, 5)
+                                print(f"  [模型] PPG 实测 {ppg_rate:.0f}Hz → 降采样到 100Hz，样本 {len(ppg_vals)}")
+                            ppg_32s = ppg_vals[-MODEL_WINDOW_SEC*PPG_FS:]
                             from abp_sensor_bridge import process_sensor_data
                             sbp, dbp, map_val, wf = process_sensor_data(
                                 ecg_32s, ppg_32s, NIBP['sys'], NIBP['dias'], NIBP['mean'])
