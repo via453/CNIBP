@@ -19,3 +19,6 @@ BP.zip
 *.docx
 课设报告*
 cNIBP*.pdf
+
+# 个体校准数据（含受试者血压读数，属运行时私有配置）
+v1/algorithm/calib.json

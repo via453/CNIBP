@@ -1,0 +1,13 @@
+{
+  "_说明": "示例文件。运行 ppg2abp_bridge.py --calib 120/80 会生成 calib.json（已 gitignore）。",
+  "sbp_ref": 120.0,
+  "dbp_ref": 80.0,
+  "sbp_model": 139.5,
+  "dbp_model": 62.0,
+  "offset_map": -9.2,
+  "scale_pp": 0.4,
+  "pp_ref": 40.0,
+  "pp_model": 77.5,
+  "created": "2026-01-01T00:00:00",
+  "source": "capture.csv"
+}

@@ -21,6 +21,7 @@ import sys
 import time
 
 import numpy as np
+from bp_calibration import BPCalibration, parse_pair, DEFAULT_CALIB_PATH
 
 TARGET_LENGTH = 1024      # 模型输入长度
 TARGET_RATE = 125         # 模型采样率
@@ -201,6 +202,10 @@ def main():
     ap.add_argument('--window', type=float, default=8.2, help='分析窗口（秒），默认 8.2')
     ap.add_argument('--model-dir', help='PPG2ABP 工程目录（含 models/ 与 models.py）')
     ap.add_argument('--avg', type=int, default=3, help='多窗平均次数，默认 3（与原版一致）')
+    ap.add_argument('--calib', metavar='SBP/DBP',
+                    help='用本次测量的模型输出与该袖带读数拟合并保存校准，例如 --calib 100/66')
+    ap.add_argument('--calib-file', default=None, help='校准文件路径，默认 algorithm/calib.json')
+    ap.add_argument('--no-calib', action='store_true', help='忽略已保存的校准，只看模型原始输出')
     args = ap.parse_args()
 
     win = max(RAW_LENGTH, int(round(args.window * SENSOR_RATE)))
@@ -221,15 +226,48 @@ def main():
     if len(rows) > 1:
         print(f'[ppg2abp] {len(rows)} 窗平均：' +
               ' | '.join('%.1f/%.1f/%.1f' % r for r in rows))
+    raw_sbp, raw_dbp, raw_map = sbp, dbp, mapv
+
+    # ---- 校准 ----
+    calib_path = args.calib_file or DEFAULT_CALIB_PATH
+    if args.calib:
+        sbp_ref, dbp_ref = parse_pair(args.calib)
+        cal = BPCalibration(sbp_ref, dbp_ref, raw_sbp, raw_dbp,
+                            source=os.path.basename(args.csv or args.port or ''))
+        saved = cal.save(calib_path)
+        print()
+        print(f'[校准] 已拟合并保存到 {saved}')
+        print(f'[校准] {cal.describe()}')
+    elif args.no_calib:
+        cal = None
+    else:
+        cal = BPCalibration.load(calib_path)
+        if cal:
+            print()
+            print(f'[校准] 已加载 {calib_path}')
+            print(f'[校准] {cal.describe()}')
+
+    if cal:
+        sbp, dbp, mapv = cal.apply_triplet(raw_sbp, raw_dbp, raw_map)
+
     print()
     print('=' * 46)
+    if cal:
+        print(f'  模型原始输出：SBP {raw_sbp:.1f} / DBP {raw_dbp:.1f} / MAP {raw_map:.1f}')
+        print('  ' + '-' * 42)
     print(f'  SBP = {sbp:6.1f} mmHg')
     print(f'  DBP = {dbp:6.1f} mmHg')
     print(f'  MAP = {mapv:6.1f} mmHg')
     print(f'  ABP 波形：{abp.shape[0]} 点，范围 {abp.min():.1f} ~ {abp.max():.1f}')
     print('=' * 46)
-    ok = 80 <= sbp <= 200 and 40 <= dbp <= 120 and sbp - dbp >= 15
+    if cal:
+        ok = not cal.clamp(sbp, dbp)
+    else:
+        ok = 80 <= sbp <= 200 and 40 <= dbp <= 120 and sbp - dbp >= 15
     print('生理合理性：', 'PASS' if ok else 'FAIL（检查 PPG 是否稳定、手指是否压实）')
+    if cal:
+        print(f'  提示：脉压已按 ×{cal.scale_pp:.3f} 压到参考尺度；'
+              f'若参考脉压偏离实际，请重新校准。')
 
 
 if __name__ == '__main__':
