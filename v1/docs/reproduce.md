@@ -209,3 +209,25 @@ python v1\tools\diag_sim_window.py --model  :: 连模型一起跑
   PAT = 220.0 ± 17.7 ms
     ✓ 峰值与 PAT 均合理，模型输出可用
 ```
+
+## 7. 备选路线：PPG2ABP（只要 PPG，不需要 ECG）
+
+干电极心电质量不达标时用这条。模型：UNetDS64(ApproximateNetwork.h5, 10.5M 参数)
+→ MultiResUNet1D(RefinementNetwork.h5, 11.7M 参数)，输入 820 点 @100Hz（8.2 s）。
+
+```bat
+:: 实时（读 0xBB 帧的 IR，3 窗平均）
+python C://Users//Zelvia//cnibp.staging//v1//algorithm//ppg2abp_bridge.py --port COM9 --avg 3
+
+:: 离线（页面导出的 CSV）
+python C://Users//Zelvia//cnibp.staging//v1//algorithm//ppg2abp_bridge.py ^
+       --csv "C://Users//Zelvia//DeskBox//NOW_11//课设无袖带血压//调试csv//xxx.csv"
+```
+
+模型默认从 `G://Class_Design//Class_Design//fork_BP//Projects//PPG2ABP//codes` 加载（255 MB，未入 Git），
+可用 `--model-dir` 或环境变量 `PPG2ABP_HOME` 覆盖。
+
+实测（2026-11-13，同一硬件，手指压在 MAX30102 上）：
+- 实时 3 窗：148.2 / 143.7 / 147.0 → 平均 **146.3 / 65.8 / 96.2 mmHg**
+- 离线 CSV：**124.0 / 57.6 / 84.7 mmHg**
+两次差异来自 PPG 的基线漂移（手在动），模型本身稳定。绝对准确度需袖带读数做参照。
